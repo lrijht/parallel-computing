@@ -21,29 +21,41 @@ std::string reverseSequential(const std::string& s) {
     return result;
 }
 
-int main() {
+void runTest(std::size_t size) {
+    std::string str = generateString(size);
 
-    std::string test = "Hello World";
-    std::string testReversed = reverseSequential(test);
-    std::cout << "Test original: " << test << "\n";
-    std::cout << "Test reversed: " << testReversed << "\n\n";
-
-    const std::size_t SIZE = 10'000'000; // 10 мільйонів символів
-
-    std::string str = generateString(SIZE);
+    volatile char sink = reverseSequential(str)[0];
 
     auto begin = high_resolution_clock::now();
     std::string reversed = reverseSequential(str);
     auto end = high_resolution_clock::now();
 
-    auto elapsed = duration_cast<nanoseconds>(end - begin);
-    std::cout << "String size: " << SIZE << "\n";
-    std::cout << "Sequential time: " << elapsed.count() * 1e-9 << " seconds\n";
-    std::cout << "First 20 original: " << str.substr(0, 20) << "\n";
-    std::cout << "Last  20 original: " << str.substr(str.size() - 20) << "\n";
-    std::cout << "First 20 reversed: " << reversed.substr(0, 20) << "\n";
-    std::cout << "Last 20 reversed: " << reversed.substr(str.size() -20) << "\n\n";
+    sink = reversed[0];
 
+    auto elapsed = duration_cast<nanoseconds>(end - begin);
+    double seconds = elapsed.count() * 1e-9;
+
+    std::cout << "Size: " << size
+              << " | Time: " << seconds << " s"
+              << " | First 20: " << str.substr(0, 20)
+              << " | Last 20 original: " << str.substr(str.size() - 20)
+              << " | First 20 reversed: " << reversed.substr(0, 20)
+              << "\n";
+}
+
+int main() {
+    std::size_t sizes[] = {
+        100'000,
+        1'000'000,
+        5'000'000,
+        10'000'000,
+        50'000'000,
+        100'000'000
+    };
+
+    for (auto size : sizes) {
+        runTest(size);
+    }
 
     return 0;
 }
