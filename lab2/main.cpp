@@ -3,6 +3,8 @@
 #include <chrono>
 #include <random>
 #include <climits>
+#include <mutex>
+#include <thread>
 
 using std::chrono::nanoseconds;
 using std::chrono::duration_cast;
@@ -45,6 +47,48 @@ Result sequentialOdd(const std::vector<int>& arr)
             if (x < minOdd) minOdd = x;
         }
     }
+    return { diff, minOdd };
+}
+
+Result mutexOdd(const std::vector<int>& arr, std::size_t numThreads) {
+    long long totalSum = 0;
+    int firstOdd = INT_MAX;
+    int minOdd = INT_MAX;
+    std::mutex mtx;
+    std::vector<std::thread> threads;
+    std::size_t chunkSize = arr.size() / numThreads;
+
+    for (std::size_t i = 0; i < numThreads; i++) {
+        std::size_t start = i * chunkSize;
+        std::size_t end = (i == numThreads - 1) ? arr.size() : start + chunkSize;
+
+        threads.emplace_back([&, start, end]() {
+            long long localSum = 0;
+            int localMin = INT_MAX;
+
+            for (std::size_t j = start; j < end; j++) {
+                int x = arr[j];
+                if (x % 2 != 0) {
+                    localSum += x;
+                    if (x < localMin) localMin = x;
+                }
+            }
+
+            std::lock_guard<std::mutex> lock(mtx);
+            totalSum += localSum;
+            if (localMin < minOdd) minOdd = localMin;
+        });
+    }
+
+    for (auto& t : threads) t.join();
+
+
+    int firstOddVal = INT_MAX;
+    for (int x : arr) {
+        if (x % 2 != 0) { firstOddVal = x; break; }
+    }
+
+    long long diff = (firstOddVal != INT_MAX) ? (2 * firstOddVal - totalSum) : 0;
     return { diff, minOdd };
 }
 
@@ -94,5 +138,25 @@ int main()
         runTest(size);
     }
 
+    std::cout << "\n=== Mutex version (20 threads) ===\n";
+    std::size_t numThreads = 20;
+
+    for (auto size : sizes) {
+        std::vector<int> arr = generateArray(size);
+
+        volatile long long sink = mutexOdd(arr, numThreads).difference;
+
+        auto begin = high_resolution_clock::now();
+        Result result = mutexOdd(arr, numThreads);
+        auto end = high_resolution_clock::now();
+
+        sink = result.difference;
+
+        auto elapsed = duration_cast<nanoseconds>(end - begin);
+        std::cout << "Size: " << size
+                  << " | Difference: " << result.difference
+                  << " | Min odd: " << result.minOdd
+                  << " | Time: " << elapsed.count() * 1e-9 << " s\n";
+    }
     return 0;
 }
