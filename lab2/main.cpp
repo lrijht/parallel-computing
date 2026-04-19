@@ -5,6 +5,8 @@
 #include <climits>
 #include <mutex>
 #include <thread>
+#include <atomic>
+
 
 using std::chrono::nanoseconds;
 using std::chrono::duration_cast;
@@ -92,6 +94,53 @@ Result mutexOdd(const std::vector<int>& arr, std::size_t numThreads) {
     return { diff, minOdd };
 }
 
+Result atomicCAS(const std::vector<int>& arr, std::size_t numThreads) {
+    std::atomic<long long> totalSum(0);
+    std::atomic<int> minOdd(INT_MAX);
+
+    std::vector<std::thread> threads;
+    std::size_t chunkSize = arr.size() / numThreads;
+
+    for (std::size_t i = 0; i < numThreads; i++) {
+        std::size_t start = i * chunkSize;
+        std::size_t end = (i == numThreads - 1) ? arr.size() : start + chunkSize;
+
+        threads.emplace_back([&, start, end]() {
+            long long localSum = 0;
+            int localMin = INT_MAX;
+
+            for (std::size_t j = start; j < end; j++) {
+                int x = arr[j];
+                if (x % 2 != 0) {
+                    localSum += x;
+                    if (x < localMin) localMin = x;
+                }
+            }
+
+            long long expected = totalSum.load();
+            while (!totalSum.compare_exchange_weak(expected, expected + localSum)) {
+            }
+
+            int expectedMin = minOdd.load();
+            while (localMin < expectedMin) {
+                if (minOdd.compare_exchange_weak(expectedMin, localMin)) {
+                    break;
+                }
+            }
+        });
+    }
+
+    for (auto& t : threads) t.join();
+
+    int firstOddVal = INT_MAX;
+    for (int x : arr) {
+        if (x % 2 != 0) { firstOddVal = x; break; }
+    }
+
+    long long diff = (firstOddVal != INT_MAX) ? (2LL * firstOddVal - totalSum.load()) : 0;
+    return { diff, minOdd.load() };
+}
+
 void runTest(std::size_t size)
 {
     std::vector<int> arr = generateArray(size);
@@ -158,5 +207,26 @@ int main()
                   << " | Min odd: " << result.minOdd
                   << " | Time: " << elapsed.count() * 1e-9 << " s\n";
     }
+
+    std::cout << "\n=== Atomic CAS version (20 threads) ===\n";
+
+    for (auto size : sizes) {
+        std::vector<int> arr = generateArray(size);
+
+        volatile long long sink = atomicCAS(arr, numThreads).difference;
+
+        auto begin = high_resolution_clock::now();
+        Result result = atomicCAS(arr, numThreads);
+        auto end = high_resolution_clock::now();
+
+        sink = result.difference;
+
+        auto elapsed = duration_cast<nanoseconds>(end - begin);
+        std::cout << "Size: " << size
+                  << " | Difference: " << result.difference
+                  << " | Min odd: " << result.minOdd
+                  << " | Time: " << elapsed.count() * 1e-9 << " s\n";
+    }
+
     return 0;
 }
