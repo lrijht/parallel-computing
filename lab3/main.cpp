@@ -3,29 +3,49 @@
 #include <mutex>
 #include <condition_variable>
 #include <functional>
-#include <vector>
 #include <chrono>
 #include <random>
 #include <atomic>
 
 using namespace std::chrono;
 
+struct Metrics {
+    std::atomic<int> tasksAccepted{0};
+    std::atomic<int> tasksRejected{0};
+    std::atomic<int> tasksCompleted{0};
+    std::atomic<long long> totalWaitTimeMs{0};
+    std::atomic<long long> totalTaskTimeMs{0};
+
+    void print(double testDurationSec) const {
+        int completed = tasksCompleted.load();
+        double avgWait = completed > 0 ? (totalWaitTimeMs.load() / 1000.0) / completed : 0;
+        double avgTask = completed > 0 ? (totalTaskTimeMs.load() / 1000.0) / completed : 0;
+
+        std::cout << "\n METRICS \n";
+        std::cout << "Test duration:       " << testDurationSec << " s\n";
+        std::cout << "Tasks accepted:      " << tasksAccepted.load() << "\n";
+        std::cout << "Tasks rejected:      " << tasksRejected.load() << "\n";
+        std::cout << "Tasks completed:     " << completed << "\n";
+        std::cout << "Avg wait time:       " << avgWait << " s\n";
+        std::cout << "Avg task exec time:  " << avgTask << " s\n";
+    }
+};
 
 struct Worker {
     std::thread thread;
     std::function<void()> task;
+    int taskDuration = 0;
     bool busy = false;
     bool terminate = false;
     std::mutex mtx;
     std::condition_variable cv;
 };
 
-
 class ThreadPool {
 public:
     static constexpr int WORKER_COUNT = 8;
 
-    ThreadPool() {
+    ThreadPool(Metrics& metrics) : m_metrics(metrics) {
         for (int i = 0; i < WORKER_COUNT; i++) {
             workers[i] = std::make_unique<Worker>();
             workers[i]->thread = std::thread(&ThreadPool::workerRoutine, this, i);
@@ -33,20 +53,23 @@ public:
         std::cout << "[Pool] Initialized with " << WORKER_COUNT << " workers\n";
     }
 
-    ~ThreadPool() {
-        shutdown();
-    }
+    ~ThreadPool() { shutdown(); }
 
-    bool addTask(std::function<void()> task) {
+    bool addTask(std::function<void()> task, int durationSec) {
+        if (paused) return false;
+
         for (int i = 0; i < WORKER_COUNT; i++) {
             std::unique_lock<std::mutex> lock(workers[i]->mtx);
             if (!workers[i]->busy && !workers[i]->terminate) {
                 workers[i]->task = std::move(task);
+                workers[i]->taskDuration = durationSec;
                 workers[i]->busy = true;
                 workers[i]->cv.notify_one();
+                m_metrics.tasksAccepted++;
                 return true;
             }
         }
+        m_metrics.tasksRejected++;
         return false;
     }
 
@@ -57,9 +80,8 @@ public:
             workers[i]->cv.notify_one();
         }
         for (int i = 0; i < WORKER_COUNT; i++) {
-            if (workers[i]->thread.joinable()) {
+            if (workers[i]->thread.joinable())
                 workers[i]->thread.join();
-            }
         }
         std::cout << "[Pool] Shutdown complete\n";
     }
@@ -72,28 +94,19 @@ public:
             workers[i]->cv.notify_one();
         }
         for (int i = 0; i < WORKER_COUNT; i++) {
-            if (workers[i]->thread.joinable()) {
+            if (workers[i]->thread.joinable())
                 workers[i]->thread.join();
-            }
         }
         std::cout << "[Pool] Force shutdown complete\n";
     }
 
-    void pause() {
-        paused = true;
-        std::cout << "[Pool] Paused\n";
-    }
-
-    void resume() {
-        paused = false;
-        std::cout << "[Pool] Resumed\n";
-    }
-
-    bool isPaused() const { return paused; }
+    void pause()  { paused = true;  std::cout << "[Pool] Paused\n"; }
+    void resume() { paused = false; std::cout << "[Pool] Resumed\n"; }
 
 private:
     std::unique_ptr<Worker> workers[WORKER_COUNT];
     std::atomic<bool> paused{false};
+    Metrics& m_metrics;
 
     void workerRoutine(int id) {
         while (true) {
@@ -105,56 +118,86 @@ private:
                 workers[id]->cv.wait(lock, [&] {
                     return workers[id]->busy || workers[id]->terminate;
                 });
-
-                if (workers[id]->terminate) {
-                    std::cout << "[Worker " << id << "] Terminating\n";
-                    return;
-                }
-
+                if (workers[id]->terminate) return;
                 task = std::move(workers[id]->task);
             }
 
             auto waitEnd = high_resolution_clock::now();
-            double waitTime = duration_cast<milliseconds>(waitEnd - waitStart).count() / 1000.0;
-            std::cout << "[Worker " << id << "] waited " << waitTime << "s, starting task\n";
+            m_metrics.totalWaitTimeMs += duration_cast<milliseconds>(waitEnd - waitStart).count();
 
+            auto taskStart = high_resolution_clock::now();
             if (task) task();
+            auto taskEnd = high_resolution_clock::now();
+
+            m_metrics.totalTaskTimeMs += duration_cast<milliseconds>(taskEnd - taskStart).count();
+            m_metrics.tasksCompleted++;
 
             {
                 std::unique_lock<std::mutex> lock(workers[id]->mtx);
                 workers[id]->busy = false;
             }
-
-            std::cout << "[Worker " << id << "] Task done\n";
         }
     }
 };
 
+void taskGenerator(ThreadPool& pool, std::atomic<bool>& running) {
+    std::mt19937 rng(std::random_device{}());
+    std::uniform_int_distribution<int> duration(10, 14);
+    std::uniform_int_distribution<int> interval(1, 3);
+
+    while (running) {
+        int dur = duration(rng);
+        bool accepted = pool.addTask([dur]() {
+            std::this_thread::sleep_for(seconds(dur));
+        }, dur);
+
+        std::cout << "[Generator] Task " << dur << "s "
+                  << (accepted ? "accepted" : "REJECTED") << "\n";
+
+        std::this_thread::sleep_for(seconds(interval(rng)));
+    }
+}
+
 int main() {
-    ThreadPool pool;
-
-    std::mt19937 rng(42);
-    std::uniform_int_distribution<int> taskDuration(10, 14);
-
-    std::cout << "\n Test 1: Add 8 tasks \n";
-    for (int i = 0; i < 8; i++) {
-        int duration = taskDuration(rng);
-        bool accepted = pool.addTask([i, duration]() {
-            std::cout << "[Task " << i << "] Running for " << duration << "s\n";
-            std::this_thread::sleep_for(std::chrono::seconds(duration));
-        });
-        std::cout << "[Main] Task " << i << (accepted ? " accepted" : " REJECTED") << "\n";
+    std::cout << "\nTEST 1: 30 seconds\n";
+    {
+        Metrics metrics;
+        ThreadPool pool(metrics);
+        std::atomic<bool> running{true};
+        std::thread gen(taskGenerator, std::ref(pool), std::ref(running));
+        std::this_thread::sleep_for(seconds(30));
+        running = false;
+        gen.join();
+        metrics.print(30);
     }
 
-    std::cout << "\n Test 2: Add tasks while all busy (should reject) \n";
-    for (int i = 8; i < 12; i++) {
-        bool accepted = pool.addTask([i]() {
-            std::this_thread::sleep_for(std::chrono::seconds(10));
-        });
-        std::cout << "[Main] Task " << i << (accepted ? " accepted" : " REJECTED") << "\n";
+    std::cout << "\n TEST 2: 60 seconds\n";
+    {
+        Metrics metrics;
+        ThreadPool pool(metrics);
+        std::atomic<bool> running{true};
+        std::thread gen(taskGenerator, std::ref(pool), std::ref(running));
+        std::this_thread::sleep_for(seconds(60));
+        running = false;
+        gen.join();
+        metrics.print(60);
     }
 
-    std::this_thread::sleep_for(std::chrono::seconds(15));
+    std::cout << "\nTEST 3: pause/resume (40s total)\n";
+    {
+        Metrics metrics;
+        ThreadPool pool(metrics);
+        std::atomic<bool> running{true};
+        std::thread gen(taskGenerator, std::ref(pool), std::ref(running));
+        std::this_thread::sleep_for(seconds(15));
+        pool.pause();
+        std::this_thread::sleep_for(seconds(10));
+        pool.resume();
+        std::this_thread::sleep_for(seconds(15));
+        running = false;
+        gen.join();
+        metrics.print(40);
+    }
 
     return 0;
 }
