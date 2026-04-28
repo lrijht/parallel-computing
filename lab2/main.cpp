@@ -65,20 +65,17 @@ Result mutexOdd(const std::vector<int>& arr, std::size_t numThreads) {
         std::size_t end = (i == numThreads - 1) ? arr.size() : start + chunkSize;
 
         threads.emplace_back([&, start, end]() {
-            long long localSum = 0;
-            int localMin = INT_MAX;
 
             for (std::size_t j = start; j < end; j++) {
                 int x = arr[j];
                 if (x % 2 != 0) {
-                    localSum += x;
-                    if (x < localMin) localMin = x;
+                    std::lock_guard<std::mutex> lock(mtx);
+                    totalSum += x;
+                    if (x < minOdd) minOdd = x;
                 }
             }
 
-            std::lock_guard<std::mutex> lock(mtx);
-            totalSum += localSum;
-            if (localMin < minOdd) minOdd = localMin;
+
         });
     }
 
